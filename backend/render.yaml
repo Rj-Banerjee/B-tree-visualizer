@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bstar-tree-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+

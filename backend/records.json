@@ -1,0 +1,12 @@
+[
+  {
+    "rollNo": 1,
+    "name": "raj",
+    "department": "cse"
+  },
+  {
+    "rollNo": 2,
+    "name": "asad",
+    "department": "cse"
+  }
+]
