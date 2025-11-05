@@ -1,8 +1,4 @@
-const envBase = import.meta.env.VITE_API_BASE_URL
-const DEFAULT_DEV = 'http://localhost:5000'
-const DEFAULT_FALLBACK = 'http://localhost:4000'
-// Prefer explicit env; otherwise choose sensible default per mode
-const BASE = envBase || (import.meta.env.PROD ? DEFAULT_DEV : DEFAULT_DEV) || DEFAULT_FALLBACK
+const BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000'
 
 async function req(path, opts = {}) {
 	const r = await fetch(`${BASE}${path}`, {
