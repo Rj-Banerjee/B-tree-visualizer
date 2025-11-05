@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as d3 from 'd3'
+import { annotateTreeWithSizes, getTreeSeparation, scaleDepthY, computeBoundsFromNodes } from '../utils/visualLayout'
 
 const COLORS = {
 	leaf: '#22c55e',
@@ -14,6 +15,8 @@ export default function TreeVisualizer({ data, lastResult }) {
 	const gRef = useRef(null)
 	const zoomBehaviorRef = useRef(null)
 	const resizeObserverRef = useRef(null)
+	const currentTransformRef = useRef(d3.zoomIdentity)
+	const hasUserInteractedRef = useRef(false)
 	const [containerSize, setContainerSize] = useState({ width: 800, height: 420 })
 
 	const isEmpty = useMemo(() => {
@@ -37,18 +40,11 @@ export default function TreeVisualizer({ data, lastResult }) {
 	}, [data, isEmpty])
 
 	const layoutConfig = useMemo(() => {
-		const baseX = 100
-		const baseY = 140
-		const depthFactor = stats.depth > 0 ? Math.max(0.6, 1.0 - (stats.depth - 3) * 0.08) : 1
-		const nodeFactor = stats.nodes > 0 ? Math.max(0.6, 1.0 - (stats.nodes - 10) * 0.01) : 1
-		const scaleFactor = Math.min(depthFactor, nodeFactor)
-		const nodeWidth = 90 * scaleFactor
-		const nodeHeight = 48 * scaleFactor
-		const nodeX = baseX * scaleFactor
-		const nodeY = baseY * scaleFactor
-		const padding = 40
-		return { nodeWidth, nodeHeight, nodeX, nodeY, padding }
-	}, [stats])
+		const baseStepX = 90
+		const baseStepY = 140
+		const padding = 60
+		return { baseStepX, baseStepY, padding }
+	}, [])
 
 	useEffect(() => {
 		if (!containerRef.current) return
@@ -77,6 +73,8 @@ export default function TreeVisualizer({ data, lastResult }) {
 			.scaleExtent([0.2, 2.5])
 			.on('zoom', (event) => {
 				g.attr('transform', event.transform)
+				currentTransformRef.current = event.transform
+				hasUserInteractedRef.current = true
 			})
 		svg.call(zoomBehaviorRef.current)
 		svg.on('dblclick.zoom', null)
@@ -85,29 +83,33 @@ export default function TreeVisualizer({ data, lastResult }) {
 			return
 		}
 
-		const root = d3.hierarchy(data, d => d.children || [])
-		const treeLayout = d3.tree().nodeSize([layoutConfig.nodeX, layoutConfig.nodeY])
+		// Annotate data with per-node sizes based on key text
+		const sizedData = annotateTreeWithSizes(JSON.parse(JSON.stringify(data)))
+		const root = d3.hierarchy(sizedData, d => d.children || [])
+		const separation = getTreeSeparation(100)
+		const approxHeight = Math.max(1, stats.depth) * layoutConfig.baseStepX * 1.4
+		const approxWidth = Math.max(1, stats.nodes) * layoutConfig.baseStepY
+		const treeLayout = d3.tree().size([approxHeight, approxWidth]).separation(separation)
 		treeLayout(root)
+		// Scale Y by depth to give more room deeper in the tree
+		root.each(d => { d.y = scaleDepthY(d.y, d.depth, 0.14) })
 
 		const activeSet = new Set(lastResult?.path || [])
 
-		let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
-		root.each((d) => {
-			xMin = Math.min(xMin, d.x)
-			xMax = Math.max(xMax, d.x)
-			yMin = Math.min(yMin, d.y)
-			yMax = Math.max(yMax, d.y)
-		})
-		const pad = layoutConfig.padding
-		const contentWidth = (yMax - yMin) + layoutConfig.nodeWidth + pad * 2
-		const contentHeight = (xMax - xMin) + layoutConfig.nodeHeight + pad * 2
+		const bounds = computeBoundsFromNodes(root.descendants(), layoutConfig.padding)
+		const contentWidth = bounds.width
+		const contentHeight = bounds.height
 		const scale = Math.min(width / contentWidth, height / contentHeight)
-		const tx = (width - (yMax + layoutConfig.nodeWidth / 2 - (yMin - layoutConfig.nodeWidth / 2)) * scale) / 2
-		const ty = (height - (xMax + layoutConfig.nodeHeight / 2 - (xMin - layoutConfig.nodeHeight / 2)) * scale) / 2
-
-		svg.call(zoomBehaviorRef.current.transform, d3.zoomIdentity
-			.translate(tx + (-yMin + pad) * scale, ty + (-xMin + pad) * scale)
-			.scale(scale))
+		const tx = (width - (bounds.yMax - bounds.yMin) * scale) / 2 - bounds.yMin * scale
+		const ty = (height - (bounds.xMax - bounds.xMin) * scale) / 2 - bounds.xMin * scale
+		// Preserve user zoom; only auto-fit if user hasn't interacted yet
+		if (hasUserInteractedRef.current) {
+			svg.call(zoomBehaviorRef.current.transform, currentTransformRef.current)
+		} else {
+			const fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale)
+			currentTransformRef.current = fitTransform
+			svg.call(zoomBehaviorRef.current.transform, fitTransform)
+		}
 
 		g.append('g')
 			.selectAll('path')
@@ -121,25 +123,29 @@ export default function TreeVisualizer({ data, lastResult }) {
 			.selectAll('g')
 			.data(root.descendants())
 			.join('g')
-			.attr('transform', d => `translate(${d.y - layoutConfig.nodeWidth/2}, ${d.x - layoutConfig.nodeHeight/2})`)
+			.attr('transform', d => {
+				const w = d.data?._viz?.nodeWidth ?? 90
+				const h = d.data?._viz?.nodeHeight ?? 48
+				return `translate(${d.y - w/2}, ${d.x - h/2})`
+			})
 
 		node.append('rect')
 			.attr('rx', 12)
 			.attr('ry', 12)
-			.attr('width', layoutConfig.nodeWidth)
-			.attr('height', layoutConfig.nodeHeight)
+			.attr('width', d => d.data?._viz?.nodeWidth ?? 90)
+			.attr('height', d => d.data?._viz?.nodeHeight ?? 48)
 			.attr('fill', d => activeSet.has(d.data.nodeId) ? COLORS.active : (d.data.type === 'leaf' ? COLORS.leaf : COLORS.internal))
 			.attr('opacity', 0.95)
 			.attr('stroke', 'white')
 			.attr('stroke-width', 1.5)
 
 		node.append('text')
-			.attr('x', layoutConfig.nodeWidth / 2)
-			.attr('y', layoutConfig.nodeHeight / 2 + 3)
+			.attr('x', d => (d.data?._viz?.nodeWidth ?? 90) / 2)
+			.attr('y', d => (d.data?._viz?.nodeHeight ?? 48) / 2 + 3)
 			.attr('text-anchor', 'middle')
 			.attr('fill', 'white')
-			.attr('font-size', Math.max(10, 12 * (layoutConfig.nodeWidth / 90)))
-			.text(d => (d.data.keys || []).join(','))
+			.attr('font-size', d => d.data?._viz?.fontSize ?? 12)
+			.text(d => d.data?._viz?.text ?? (d.data.keys || []).join(','))
 
 		if (lastResult?.meta?.removedKey != null) {
 			g.append('text')
@@ -168,26 +174,19 @@ export default function TreeVisualizer({ data, lastResult }) {
 		if (!g) return
 		const width = containerSize.width
 		const height = Math.max(360, containerSize.height)
-		let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity
-		g.selectAll('g').each(function() {
-			const transform = this.getAttribute('transform')
-			const match = /translate\(([-0-9.]+),\s*([-0-9.]+)\)/.exec(transform)
-			if (match) {
-				const ty = parseFloat(match[1])
-				const tx = parseFloat(match[2])
-				yMin = Math.min(yMin, ty)
-				yMax = Math.max(yMax, ty)
-				xMin = Math.min(xMin, tx)
-				xMax = Math.max(xMax, tx)
-			}
-		})
-		const pad = layoutConfig.padding
-		const contentWidth = (yMax - yMin) + layoutConfig.nodeWidth + pad * 2
-		const contentHeight = (xMax - xMin) + layoutConfig.nodeHeight + pad * 2
+		// Recompute using data-aware bounds
+		const nodes = []
+		g.selectAll('g').each(function(d) { if (d) nodes.push(d) })
+		const bounds = computeBoundsFromNodes(nodes, layoutConfig.padding)
+		const contentWidth = bounds.width
+		const contentHeight = bounds.height
 		const scale = Math.min(width / contentWidth, height / contentHeight)
-		const tx = (width - (yMax - yMin + layoutConfig.nodeWidth) * scale) / 2 - yMin * scale + pad * scale
-		const ty = (height - (xMax - xMin + layoutConfig.nodeHeight) * scale) / 2 - xMin * scale + pad * scale
-		svg.transition().duration(200).call(zoomBehaviorRef.current.transform, d3.zoomIdentity.translate(tx, ty).scale(scale))
+		const tx = (width - (bounds.yMax - bounds.yMin) * scale) / 2 - bounds.yMin * scale
+		const ty = (height - (bounds.xMax - bounds.xMin) * scale) / 2 - bounds.xMin * scale
+		const fitTransform = d3.zoomIdentity.translate(tx, ty).scale(scale)
+		currentTransformRef.current = fitTransform
+		hasUserInteractedRef.current = true
+		svg.transition().duration(200).call(zoomBehaviorRef.current.transform, fitTransform)
 	}
 
 	return (
